@@ -157,29 +157,39 @@ class EmbeddingModel(pl.LightningModule):
         return loss
 
     def on_validation_epoch_end(self):
+        # concatenate tensors
         query_embs = torch.cat(self.val_query_embeddings).numpy()
         query_labels = torch.cat(self.val_query_labels).numpy()
-        ref_embs = torch.cat(self.val_reference_embeddings).numpy()
+        ref_embs   = torch.cat(self.val_reference_embeddings).numpy()
         ref_labels = torch.cat(self.val_reference_labels).numpy()
 
         acc_calc = AccuracyCalculator(
-            include=["precision_at_1", "mean_average_precision", "mean_average_precision_at_r", "r_precision"],
+            include=[
+                "precision_at_1",
+                "mean_average_precision",
+                "mean_average_precision_at_r",
+                "r_precision"
+            ],
             k=5
         )
         metrics = acc_calc.get_accuracy(
-            query_embs, query_labels, ref_embs, ref_labels
+            query_embs,    # <-- queries
+            ref_embs,      # <-- references
+            query_labels,  # <-- query labels
+            ref_labels     # <-- reference labels
         )
 
         self.log("val/precision@1", metrics["precision_at_1"], prog_bar=True)
-        self.log("val/mAP", metrics["mean_average_precision"], prog_bar=True)
-        self.log("val/mAP@r", metrics["mean_average_precision_at_r"], prog_bar=True)
-        self.log("val/r_precision", metrics["r_precision"], prog_bar=True)
+        self.log("val/mAP",         metrics["mean_average_precision"],        prog_bar=True)
+        self.log("val/mAP@r",       metrics["mean_average_precision_at_r"],     prog_bar=True)
+        self.log("val/r_precision", metrics["r_precision"],                  prog_bar=True)
 
-        # Clear for next epoch
+        # clear for next epoch
         self.val_query_embeddings.clear()
         self.val_query_labels.clear()
         self.val_reference_embeddings.clear()
         self.val_reference_labels.clear()
+
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
