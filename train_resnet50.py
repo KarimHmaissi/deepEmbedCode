@@ -1,171 +1,132 @@
-#TEsting
-
-import os
+# TEsting  – Card metric‑learning pipeline
+# ----------------------------------------------------------------------
+import os, random
+import numpy as np
 import pandas as pd
 from PIL import Image, ImageOps
-from torch.utils.data import Dataset, DataLoader, random_split
-from torchvision import transforms
+from sklearn.preprocessing import normalize
+from sklearn.metrics import average_precision_score
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import Dataset, DataLoader
+
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
-import random
-from torchvision.utils import save_image
-from sklearn.preprocessing import normalize
-import numpy as np
-from sklearn.metrics import average_precision_score
 
-# pytorch-metric-learning imports
-from pytorch_metric_learning.losses import TripletMarginLoss
-from pytorch_metric_learning.miners import BatchHardMiner
+# pytorch‑metric‑learning ----------------------------------------------
+from pytorch_metric_learning.losses   import TripletMarginLoss
+from pytorch_metric_learning.miners   import BatchHardMiner
+from pytorch_metric_learning.samplers import MPerClassSampler
+from pytorch_metric_learning.utils.accuracy_calculator import AccuracyCalculator
+# ----------------------------------------------------------------------
 
-# For a pretrained ResNet50
 from torchvision.models import resnet50, ResNet50_Weights
+from torchvision import transforms
 from PIL.Image import Resampling
 
+# speed hint for 4090
 torch.set_float32_matmul_precision("high")
 
-
-# =======================
-# Utility Functions
-# =======================
+# ======================================================================
+# ‑‑‑ Utility -----------------------------------------------------------
 def pad_to_square(img):
     return ImageOps.pad(img, (224, 224), method=Resampling.BICUBIC, color=(0, 0, 0))
 
-def make_contiguous(x):
+def make_contiguous(x):        # avoids non‑contiguous warning inside AMP
     return x.contiguous()
 
 class RandomGaussianNoise:
     def __init__(self, mean=0.0, std=0.02, p=0.3):
-        self.mean = mean
-        self.std = std
-        self.p = p
-
+        self.mean, self.std, self.p = mean, std, p
     def __call__(self, img_tensor):
         if random.random() < self.p:
-            noise = torch.randn_like(img_tensor) * self.std + self.mean
-            img_tensor = img_tensor + noise
+            img_tensor += torch.randn_like(img_tensor)*self.std + self.mean
             img_tensor.clamp_(0, 1)
         return img_tensor
-
-def compute_metrics(embeddings, labels):
-    embeddings = F.normalize(embeddings, p=2, dim=1)
-    labels = labels.cpu().numpy()
-    sims = torch.matmul(embeddings, embeddings.T).cpu().numpy()
-
-    top1, recall_at_5, average_precisions = 0, 0, []
-
-    for i in range(len(labels)):
-        sims[i, i] = -np.inf  # exclude self
-        top_k = np.argsort(sims[i])[::-1]
-        top1 += (labels[i] == labels[top_k[0]])
-        recall_at_5 += (labels[i] in labels[top_k[:5]])
-
-        y_true = (labels == labels[i]).astype(int)
-        y_scores = sims[i]
-        average_precisions.append(average_precision_score(y_true, y_scores))
-
-    return top1 / len(labels), recall_at_5 / len(labels), np.mean(average_precisions)
-
-# =======================
-# DATASET
-# =======================
+# ======================================================================
+# ‑‑‑ Dataset -----------------------------------------------------------
 class CardDataset(Dataset):
-    def __init__(self, csv_path: str, root_dir: str, transform=None, label2idx=None):
+    def __init__(self, csv_path, root_dir, transform=None, label2idx=None):
         self.data = pd.read_csv(csv_path, header=None, names=["filename", "id_str"])
         self.root_dir = root_dir
 
+        # keep a shared label mapping so train / val use same indices
         if label2idx is None:
             unique_ids = self.data["id_str"].unique()
-            self.label2idx = {id_str: i for i, id_str in enumerate(unique_ids)}
+            self.label2idx = {id_: i for i, id_ in enumerate(unique_ids)}
         else:
             self.label2idx = label2idx
 
         self.transform = transform or transforms.Compose([
             transforms.RandomPerspective(distortion_scale=0.2, p=0.3),
-            transforms.RandomAffine(degrees=8, translate=(0.05, 0.05), scale=(0.9, 1.1), shear=3),
-            transforms.ColorJitter(brightness=0.2, contrast=0.2, saturation=0.1, hue=0.01),
+            transforms.RandomAffine(degrees=8, translate=(0.05,0.05), scale=(0.9,1.1), shear=3),
+            transforms.ColorJitter(0.2,0.2,0.1,0.01),
             transforms.RandomHorizontalFlip(p=0.5),
             transforms.Resize(224),
             transforms.Lambda(pad_to_square),
             transforms.ToTensor(),
-            transforms.RandomErasing(p=0.3, scale=(0.02, 0.2)),
-            transforms.RandomApply([transforms.GaussianBlur(kernel_size=3, sigma=(0.3, 2.0))], p=0.3),
+            transforms.RandomErasing(p=0.3, scale=(0.02,0.2)),
+            transforms.RandomApply([transforms.GaussianBlur(3,(0.3,2.0))], p=0.3),
             RandomGaussianNoise(std=0.05, p=0.3),
             transforms.Lambda(make_contiguous)
         ])
 
-    def __len__(self):
-        return len(self.data)
+    def __len__(self): return len(self.data)
 
     def __getitem__(self, idx):
-        row = self.data.iloc[idx]
+        row      = self.data.iloc[idx]
         img_path = os.path.join(self.root_dir, row["filename"])
-        img = Image.open(img_path).convert("RGB")
-        img = self.transform(img)
-        label = self.label2idx[row["id_str"]]
+        img      = Image.open(img_path).convert("RGB")
+        img      = self.transform(img)
+        label    = self.label2idx[row["id_str"]]
         return img, label
-
-
-# =======================
-# MODEL
-# =======================
-from pytorch_metric_learning.utils.accuracy_calculator import AccuracyCalculator
-
+# ======================================================================
+# ‑‑‑ Model -------------------------------------------------------------
 class EmbeddingModel(pl.LightningModule):
     def __init__(self, embedding_dim=512, lr=1e-4):
         super().__init__()
         self.save_hyperparameters()
-        backbone = resnet50(weights=ResNet50_Weights.DEFAULT)
-        self.encoder = nn.Sequential(*list(backbone.children())[:-1])
-        self.fc = nn.Linear(2048, embedding_dim)
-        self.miner = BatchHardMiner()
-        self.loss_func = TripletMarginLoss(margin=0.2)
-        self.lr = lr
 
-        # For validation
-        self.val_query_embeddings = []
-        self.val_query_labels = []
-        self.val_reference_embeddings = []
-        self.val_reference_labels = []
+        backbone      = resnet50(weights=ResNet50_Weights.DEFAULT)
+        self.encoder  = nn.Sequential(*list(backbone.children())[:-1])
+        self.fc       = nn.Linear(2048, embedding_dim)
+
+        self.miner     = BatchHardMiner()
+        self.loss_func = TripletMarginLoss(margin=0.2)
+        self.lr        = lr
+
+        # buffers for validation metrics
+        self.val_embeddings, self.val_labels = [], []
 
     def forward(self, x):
         x = self.encoder(x).squeeze(-1).squeeze(-1)
-        x = F.normalize(self.fc(x), p=2, dim=1)
-        return x
+        return F.normalize(self.fc(x), p=2, dim=1)
 
-    def training_step(self, batch, batch_idx):
+    # ---------- Train / Val steps -------------------------------------
+    def training_step(self, batch, _):
         imgs, labels = batch
-        embeddings = self(imgs)
-        hard_triplets = self.miner(embeddings, labels)
-        loss = self.loss_func(embeddings, labels, hard_triplets)
-        self.log("train_loss", loss, prog_bar=True)
+        embs = self(imgs)
+        loss = self.loss_func(embs, labels, self.miner(embs, labels))
+        self.log("train_loss", loss, prog_bar=True, batch_size=len(imgs))
         return loss
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, _):
         imgs, labels = batch
-        embeddings = self(imgs)
-        hard_triplets = self.miner(embeddings, labels)
-        loss = self.loss_func(embeddings, labels, hard_triplets)
+        embs = self(imgs)
+        loss = self.loss_func(embs, labels, self.miner(embs, labels))
 
-        # Split into query/reference randomly
-        split_point = imgs.size(0) // 2
-        self.val_query_embeddings.append(embeddings[:split_point].cpu())
-        self.val_query_labels.append(labels[:split_point].cpu())
-        self.val_reference_embeddings.append(embeddings[split_point:].cpu())
-        self.val_reference_labels.append(labels[split_point:].cpu())
-
-        self.log("val_loss", loss, prog_bar=True)
+        # store full batch – queries *and* references are identical
+        self.val_embeddings.append(embs.cpu())
+        self.val_labels.append(labels.cpu())
+        self.log("val_loss", loss, prog_bar=True, batch_size=len(imgs))
         return loss
 
     def on_validation_epoch_end(self):
-        # concatenate tensors
-        query_embs = torch.cat(self.val_query_embeddings).numpy()
-        query_labels = torch.cat(self.val_query_labels).numpy()
-        ref_embs   = torch.cat(self.val_reference_embeddings).numpy()
-        ref_labels = torch.cat(self.val_reference_labels).numpy()
+        embs   = torch.cat(self.val_embeddings).numpy()
+        labels = torch.cat(self.val_labels).numpy()
 
         acc_calc = AccuracyCalculator(
             include=[
@@ -173,136 +134,111 @@ class EmbeddingModel(pl.LightningModule):
                 "mean_average_precision",
                 "mean_average_precision_at_r",
                 "r_precision"
-            ],
-            k=5
+            ], k=5
         )
-        metrics = acc_calc.get_accuracy(
-            query=query_embs,
-            reference=ref_embs,
-            query_labels=query_labels,
-            reference_labels=ref_labels
-        )
+        metrics = acc_calc.get_accuracy(embs, embs, labels, labels)
 
         self.log("val/precision@1", metrics["precision_at_1"], prog_bar=True)
-        self.log("val/mAP",         metrics["mean_average_precision"],        prog_bar=True)
-        self.log("val/mAP@r",       metrics["mean_average_precision_at_r"],     prog_bar=True)
-        self.log("val/r_precision", metrics["r_precision"],                  prog_bar=True)
+        self.log("val/mAP",         metrics["mean_average_precision"],      prog_bar=True)
+        self.log("val/mAP@r",       metrics["mean_average_precision_at_r"], prog_bar=True)
+        self.log("val/r_precision", metrics["r_precision"],                 prog_bar=True)
 
-        # clear for next epoch
-        self.val_query_embeddings.clear()
-        self.val_query_labels.clear()
-        self.val_reference_embeddings.clear()
-        self.val_reference_labels.clear()
+        self.val_embeddings.clear()
+        self.val_labels.clear()
 
-
+    # ---------- Optim --------------------------------------------------
     def configure_optimizers(self):
-        optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=self.trainer.max_epochs, eta_min=self.lr / 50
-        )
-        return [optimizer], [scheduler]
-
-# =======================
-# INFERENCE DATASET
-# =======================
+        opt = torch.optim.AdamW(self.parameters(), lr=self.lr)
+        sch = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=self.trainer.max_epochs, eta_min=self.lr/50)
+        return [opt], [sch]
+# ======================================================================
+# ‑‑‑ Inference dataset (unchanged) ------------------------------------
 class CardInferenceDataset(Dataset):
     def __init__(self, csv_path, root_dir):
         self.data = pd.read_csv(csv_path, header=None, names=["filename", "id_str"])
         self.root_dir = root_dir
-        self.transform = transforms.Compose([
-            transforms.Resize((224, 224)),
-            transforms.ToTensor()
-        ])
-
-    def __len__(self):
-        return len(self.data)
-
+        self.transform = transforms.Compose([transforms.Resize((224,224)), transforms.ToTensor()])
+    def __len__(self): return len(self.data)
     def __getitem__(self, idx):
         row = self.data.iloc[idx]
-        img_path = os.path.join(self.root_dir, row["filename"])
-        img = Image.open(img_path).convert("RGB")
-        img = self.transform(img)
-        return img, row["id_str"], idx
-
-# =======================
-# MAIN
-# =======================
+        img = Image.open(os.path.join(self.root_dir, row["filename"])).convert("RGB")
+        return self.transform(img), row["id_str"], idx
+# ======================================================================
+# ‑‑‑ MAIN --------------------------------------------------------------
 def main():
-    BASE_DIR = "/workspace/deepEmbed"
-    CSV_FILE = os.path.join(BASE_DIR, "dataset/dataset.csv")  # Augmented entries for training
-    ORIGINAL_CSV_FILE = os.path.join(BASE_DIR, "dataset/dataset_backup.csv")  # Unique entries for validation
-    ROOT_DIR = os.path.join(BASE_DIR, "dataset")
-    CHECKPOINT_DIR = os.path.join(BASE_DIR, "checkpoints")
-    EMBEDDING_OUTPUT = os.path.join(BASE_DIR, "all_embeddings.csv")
+    BASE_DIR   = "/workspace/deepEmbed"
+    CSV_FILE   = f"{BASE_DIR}/dataset/dataset.csv"            # many entries
+    VAL_CSV    = f"{BASE_DIR}/dataset/dataset_backup.csv"     # 1 per card
+    ROOT_DIR   = f"{BASE_DIR}/dataset"
+    CKPT_DIR   = f"{BASE_DIR}/checkpoints"
+    EMB_OUT    = f"{BASE_DIR}/all_embeddings.csv"
 
     BATCH_SIZE = 440
-    EPOCHS = 200
-    EMBEDDING_DIM = 512
-    LR = 1e-4
+    EPOCHS     = 200
+    EMB_DIM    = 512
+    LR         = 1e-4
 
-    # Build shared label2idx mapping from training set
-    train_df = pd.read_csv(CSV_FILE, header=None, names=["filename", "id_str"])
-    unique_ids = train_df["id_str"].unique()
-    shared_label2idx = {id_str: i for i, id_str in enumerate(unique_ids)}
+    # ---------- shared label mapping ----------------------------------
+    shared_labels = {id_: i for i, id_ in enumerate(
+        pd.read_csv(CSV_FILE, header=None, names=["f","id"])["id"].unique()
+    )}
 
-    train_dataset = CardDataset(CSV_FILE, ROOT_DIR, label2idx=shared_label2idx)
-    val_dataset = CardDataset(ORIGINAL_CSV_FILE, ROOT_DIR, label2idx=shared_label2idx)
+    train_ds = CardDataset(CSV_FILE, ROOT_DIR, label2idx=shared_labels)
+    val_ds   = CardDataset(VAL_CSV,  ROOT_DIR, label2idx=shared_labels)
 
-    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=15)
-    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=10)
-
-    model = EmbeddingModel(embedding_dim=EMBEDDING_DIM, lr=LR)
-
-    checkpoint_callback = ModelCheckpoint(
-        monitor="val/precision@1",
-        save_top_k=1,
-        mode="max",
-        filename="best-checkpoint",
-        save_last=True,
-        dirpath=CHECKPOINT_DIR
+    # ------ Balanced sampler for validation ---------------------------
+    val_labels = [shared_labels[id_] for id_ in val_ds.data["id_str"]]
+    M = 2                              # images per class
+    val_sampler = MPerClassSampler(
+        val_labels, m=M, batch_size=BATCH_SIZE,
+        length_before_new_iter=len(val_labels)
     )
 
-    logger = TensorBoardLogger(
-        save_dir=CHECKPOINT_DIR,
-        name="metric_learning_logs"
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True,  num_workers=15)
+    val_loader   = DataLoader(val_ds,   batch_sampler=val_sampler,            num_workers=10)
+
+    # ---------- Lightning plumbing ------------------------------------
+    model = EmbeddingModel(embedding_dim=EMB_DIM, lr=LR)
+
+    ckpt_cb = ModelCheckpoint(
+        monitor="val/precision@1", mode="max",
+        save_top_k=1, filename="best-checkpoint", save_last=True,
+        dirpath=CKPT_DIR
     )
+    logger = TensorBoardLogger(CKPT_DIR, name="metric_learning_logs")
 
     trainer = pl.Trainer(
-        max_epochs=EPOCHS,
-        accelerator="auto",
-        precision="16-mixed",
-        callbacks=[checkpoint_callback],
-        logger=logger,
-        default_root_dir=CHECKPOINT_DIR
+        max_epochs=EPOCHS, accelerator="auto", precision="16-mixed",
+        callbacks=[ckpt_cb], logger=logger, default_root_dir=CKPT_DIR
     )
 
-    last_ckpt_path = os.path.join(CHECKPOINT_DIR, "last-v1.ckpt")
-    resume_ckpt = last_ckpt_path if os.path.exists(last_ckpt_path) else None
-    trainer.fit(model, train_loader, val_loader, ckpt_path=resume_ckpt)
+    resume_path = os.path.join(CKPT_DIR, "last-v1.ckpt")
+    trainer.fit(model, train_loader, val_loader,
+                ckpt_path=resume_path if os.path.exists(resume_path) else None)
 
-    # Run inference on the unique set for final embedding export
-    best_model = EmbeddingModel.load_from_checkpoint(checkpoint_callback.best_model_path)
-    best_model.eval().freeze()
+    # ---------- Export full‑set embeddings -----------------------------
+    best = EmbeddingModel.load_from_checkpoint(ckpt_cb.best_model_path)
+    best.eval().freeze()
 
-    infer_dataset = CardInferenceDataset(ORIGINAL_CSV_FILE, ROOT_DIR)
-    infer_loader = DataLoader(infer_dataset, batch_size=32, shuffle=False, num_workers=4)
+    infer_loader = DataLoader(
+        CardInferenceDataset(VAL_CSV, ROOT_DIR),
+        batch_size=32, shuffle=False, num_workers=4
+    )
 
-    embeddings, ids, idxs = [], [], []
+    embs, ids, idxs = [], [], []
     with torch.no_grad():
-        for imgs, id_str, idx in infer_loader:
-            emb = best_model(imgs.to(best_model.device)).cpu()
-            embeddings.append(emb)
-            ids.extend(id_str)
-            idxs.extend(idx)
+        for imgs, id_strs, batch_idxs in infer_loader:
+            embs.append(best(imgs.to(best.device)).cpu())
+            ids.extend(id_strs); idxs.extend(batch_idxs)
 
-    embeddings = normalize(torch.cat(embeddings).numpy(), axis=1)
+    embs = normalize(torch.cat(embs).numpy(), axis=1)
+    cols = ["index","id_str"] + [f"emb_{i}" for i in range(EMB_DIM)]
+    rows = [[idxs[i], ids[i], *embs[i]] for i in range(len(ids))]
+    pd.DataFrame(rows, columns=cols).to_csv(EMB_OUT, index=False)
 
-    df_records = [[idxs[i], ids[i]] + embeddings[i].tolist() for i in range(len(ids))]
-    cols = ["index", "id_str"] + [f"emb_{i}" for i in range(EMBEDDING_DIM)]
-    pd.DataFrame(df_records, columns=cols).to_csv(EMBEDDING_OUTPUT, index=False)
+    print(f"✅ Embeddings saved to {EMB_OUT}")
+    print(f"📈 TensorBoard: tensorboard --logdir {CKPT_DIR}/metric_learning_logs")
 
-    print(f"✅ Embeddings written to: {EMBEDDING_OUTPUT}")
-    print(f"📈 Run 'tensorboard --logdir {CHECKPOINT_DIR}/metric_learning_logs' to view training logs.")
-
+# ----------------------------------------------------------------------
 if __name__ == "__main__":
     main()
