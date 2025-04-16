@@ -107,6 +107,8 @@ class CardDataset(Dataset):
 # =======================
 # MODEL
 # =======================
+from pytorch_metric_learning.utils.accuracy_calculator import AccuracyCalculator
+
 class EmbeddingModel(pl.LightningModule):
     def __init__(self, embedding_dim=512, lr=1e-4):
         super().__init__()
@@ -117,6 +119,10 @@ class EmbeddingModel(pl.LightningModule):
         self.miner = BatchHardMiner()
         self.loss_func = TripletMarginLoss(margin=0.2)
         self.lr = lr
+
+        # Store for val metrics
+        self.validation_embeddings = []
+        self.validation_labels = []
 
     def forward(self, x):
         x = self.encoder(x).squeeze(-1).squeeze(-1)
@@ -134,19 +140,42 @@ class EmbeddingModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         imgs, labels = batch
         embeddings = self(imgs)
-        return {'embeddings': embeddings, 'labels': labels}
+        hard_triplets = self.miner(embeddings, labels)
+        loss = self.loss_func(embeddings, labels, hard_triplets)
 
-    def validation_epoch_end(self, outputs):
-        all_embeddings = torch.cat([o['embeddings'] for o in outputs])
-        all_labels = torch.cat([o['labels'] for o in outputs])
-        top1, r5, mAP = compute_metrics(all_embeddings, all_labels)
-        self.log("val_top1", top1, prog_bar=True)
-        self.log("val_recall@5", r5, prog_bar=True)
-        self.log("val_mAP", mAP, prog_bar=True)
+        # Store embeddings and labels for metrics
+        self.validation_embeddings.append(embeddings.detach().cpu())
+        self.validation_labels.append(labels.detach().cpu())
+
+        self.log("val_loss", loss, prog_bar=True)
+        return loss
+
+    def on_validation_epoch_end(self):
+        # Concatenate all embeddings and labels
+        all_embeddings = torch.cat(self.validation_embeddings)
+        all_labels = torch.cat(self.validation_labels)
+
+        acc_calc = AccuracyCalculator(include=["precision_at_1", "recall_at_1", "recall_at_5", "mean_average_precision"], k=5)
+        metrics = acc_calc.get_accuracy(
+            all_embeddings.numpy(), all_embeddings.numpy(), 
+            all_labels.numpy(), all_labels.numpy(), 
+            embeddings_come_from_same_source=True
+        )
+
+        self.log("val/precision@1", metrics["precision_at_1"], prog_bar=True)
+        self.log("val/recall@1", metrics["recall_at_1"], prog_bar=True)
+        self.log("val/recall@5", metrics["recall_at_5"], prog_bar=True)
+        self.log("val/mAP", metrics["mean_average_precision"], prog_bar=True)
+
+        # Clear for next epoch
+        self.validation_embeddings.clear()
+        self.validation_labels.clear()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=self.trainer.max_epochs, eta_min=self.lr / 50)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=self.trainer.max_epochs, eta_min=self.lr / 50
+        )
         return [optimizer], [scheduler]
 
 # =======================
@@ -197,7 +226,7 @@ def main():
     model = EmbeddingModel(embedding_dim=EMBEDDING_DIM, lr=LR)
 
     checkpoint_callback = ModelCheckpoint(
-        monitor="val_top1",
+        monitor="val/precision@1",
         save_top_k=1,
         mode="max",
         filename="best-checkpoint",
