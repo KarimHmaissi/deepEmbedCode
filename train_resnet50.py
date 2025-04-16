@@ -25,6 +25,9 @@ from pytorch_metric_learning.miners import BatchHardMiner
 from torchvision.models import resnet50, ResNet50_Weights
 from PIL.Image import Resampling
 
+torch.set_float32_matmul_precision("high")
+
+
 # =======================
 # Utility Functions
 # =======================
