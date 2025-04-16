@@ -268,7 +268,7 @@ def main():
         default_root_dir=CHECKPOINT_DIR
     )
 
-    last_ckpt_path = os.path.join(CHECKPOINT_DIR, "last.ckpt")
+    last_ckpt_path = os.path.join(CHECKPOINT_DIR, "last-v1.ckpt")
     resume_ckpt = last_ckpt_path if os.path.exists(last_ckpt_path) else None
     trainer.fit(model, train_loader, val_loader, ckpt_path=resume_ckpt)
 
