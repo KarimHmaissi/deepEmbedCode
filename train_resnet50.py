@@ -173,10 +173,10 @@ class EmbeddingModel(pl.LightningModule):
             k=5
         )
         metrics = acc_calc.get_accuracy(
-            query_embs,    # <-- queries
-            ref_embs,      # <-- references
-            query_labels,  # <-- query labels
-            ref_labels     # <-- reference labels
+            query=query_embs,
+            reference=ref_embs,
+            query_labels=query_labels,
+            reference_labels=ref_labels
         )
 
         self.log("val/precision@1", metrics["precision_at_1"], prog_bar=True)
