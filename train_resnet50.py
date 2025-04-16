@@ -1,3 +1,5 @@
+#TEsting
+
 import os
 import pandas as pd
 from PIL import Image, ImageOps
@@ -12,6 +14,8 @@ from lightning.pytorch.loggers import TensorBoardLogger
 import random
 from torchvision.utils import save_image
 from sklearn.preprocessing import normalize
+import numpy as np
+from sklearn.metrics import average_precision_score
 
 # pytorch-metric-learning imports
 from pytorch_metric_learning.losses import TripletMarginLoss
@@ -41,6 +45,25 @@ class RandomGaussianNoise:
             img_tensor = img_tensor + noise
             img_tensor.clamp_(0, 1)
         return img_tensor
+
+def compute_metrics(embeddings, labels):
+    embeddings = F.normalize(embeddings, p=2, dim=1)
+    labels = labels.cpu().numpy()
+    sims = torch.matmul(embeddings, embeddings.T).cpu().numpy()
+
+    top1, recall_at_5, average_precisions = 0, 0, []
+
+    for i in range(len(labels)):
+        sims[i, i] = -np.inf  # exclude self
+        top_k = np.argsort(sims[i])[::-1]
+        top1 += (labels[i] == labels[top_k[0]])
+        recall_at_5 += (labels[i] in labels[top_k[:5]])
+
+        y_true = (labels == labels[i]).astype(int)
+        y_scores = sims[i]
+        average_precisions.append(average_precision_score(y_true, y_scores))
+
+    return top1 / len(labels), recall_at_5 / len(labels), np.mean(average_precisions)
 
 # =======================
 # DATASET
@@ -111,10 +134,15 @@ class EmbeddingModel(pl.LightningModule):
     def validation_step(self, batch, batch_idx):
         imgs, labels = batch
         embeddings = self(imgs)
-        hard_triplets = self.miner(embeddings, labels)
-        loss = self.loss_func(embeddings, labels, hard_triplets)
-        self.log("val_loss", loss, prog_bar=True)
-        return loss
+        return {'embeddings': embeddings, 'labels': labels}
+
+    def validation_epoch_end(self, outputs):
+        all_embeddings = torch.cat([o['embeddings'] for o in outputs])
+        all_labels = torch.cat([o['labels'] for o in outputs])
+        top1, r5, mAP = compute_metrics(all_embeddings, all_labels)
+        self.log("val_top1", top1, prog_bar=True)
+        self.log("val_recall@5", r5, prog_bar=True)
+        self.log("val_mAP", mAP, prog_bar=True)
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
@@ -154,8 +182,8 @@ def main():
     CHECKPOINT_DIR = os.path.join(BASE_DIR, "checkpoints")
     EMBEDDING_OUTPUT = os.path.join(BASE_DIR, "all_embeddings.csv")
 
-    BATCH_SIZE = 64
-    EPOCHS = 50
+    BATCH_SIZE = 450
+    EPOCHS = 200
     EMBEDDING_DIM = 512
     LR = 1e-4
 
@@ -163,15 +191,15 @@ def main():
     val_size = int(0.1 * len(trainval_dataset))
     train_ds, val_ds = random_split(trainval_dataset, [len(trainval_dataset) - val_size, val_size], generator=torch.Generator().manual_seed(42))
 
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=15)
+    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=10)
 
     model = EmbeddingModel(embedding_dim=EMBEDDING_DIM, lr=LR)
 
     checkpoint_callback = ModelCheckpoint(
-        monitor="val_loss",
+        monitor="val_top1",
         save_top_k=1,
-        mode="min",
+        mode="max",
         filename="best-checkpoint",
         save_last=True,
         dirpath=CHECKPOINT_DIR
@@ -191,7 +219,9 @@ def main():
         default_root_dir=CHECKPOINT_DIR
     )
 
-    trainer.fit(model, train_loader, val_loader)
+    last_ckpt_path = os.path.join(CHECKPOINT_DIR, "last.ckpt")
+    resume_ckpt = last_ckpt_path if os.path.exists(last_ckpt_path) else None
+    trainer.fit(model, train_loader, val_loader, ckpt_path=resume_ckpt)
 
     best_model = EmbeddingModel.load_from_checkpoint(checkpoint_callback.best_model_path)
     best_model.eval().freeze()
