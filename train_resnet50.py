@@ -23,12 +23,13 @@ from pytorch_metric_learning.miners import BatchHardMiner
 
 # For a pretrained ResNet50
 from torchvision.models import resnet50, ResNet50_Weights
+from PIL.Image import Resampling
 
 # =======================
 # Utility Functions
 # =======================
 def pad_to_square(img):
-    return ImageOps.pad(img, (224, 224), method=Image.BICUBIC, color=(0, 0, 0))
+    return ImageOps.pad(img, (224, 224), method=Resampling.BICUBIC, color=(0, 0, 0))
 
 def make_contiguous(x):
     return x.contiguous()
@@ -120,9 +121,11 @@ class EmbeddingModel(pl.LightningModule):
         self.loss_func = TripletMarginLoss(margin=0.2)
         self.lr = lr
 
-        # Store for val metrics
-        self.validation_embeddings = []
-        self.validation_labels = []
+        # For validation
+        self.val_query_embeddings = []
+        self.val_query_labels = []
+        self.val_reference_embeddings = []
+        self.val_reference_labels = []
 
     def forward(self, x):
         x = self.encoder(x).squeeze(-1).squeeze(-1)
@@ -143,23 +146,29 @@ class EmbeddingModel(pl.LightningModule):
         hard_triplets = self.miner(embeddings, labels)
         loss = self.loss_func(embeddings, labels, hard_triplets)
 
-        # Store embeddings and labels for metrics
-        self.validation_embeddings.append(embeddings.detach().cpu())
-        self.validation_labels.append(labels.detach().cpu())
+        # Split into query/reference randomly
+        split_point = imgs.size(0) // 2
+        self.val_query_embeddings.append(embeddings[:split_point].cpu())
+        self.val_query_labels.append(labels[:split_point].cpu())
+        self.val_reference_embeddings.append(embeddings[split_point:].cpu())
+        self.val_reference_labels.append(labels[split_point:].cpu())
 
         self.log("val_loss", loss, prog_bar=True)
         return loss
 
     def on_validation_epoch_end(self):
-        # Concatenate all embeddings and labels
-        all_embeddings = torch.cat(self.validation_embeddings).numpy()
-        all_labels = torch.cat(self.validation_labels).numpy()
+        query_embs = torch.cat(self.val_query_embeddings).numpy()
+        query_labels = torch.cat(self.val_query_labels).numpy()
+        ref_embs = torch.cat(self.val_reference_embeddings).numpy()
+        ref_labels = torch.cat(self.val_reference_labels).numpy()
 
         acc_calc = AccuracyCalculator(
             include=["precision_at_1", "mean_average_precision", "mean_average_precision_at_r", "r_precision"],
             k=5
         )
-        metrics = acc_calc.get_accuracy(all_embeddings, all_labels, all_embeddings, all_labels)
+        metrics = acc_calc.get_accuracy(
+            query_embs, query_labels, ref_embs, ref_labels
+        )
 
         self.log("val/precision@1", metrics["precision_at_1"], prog_bar=True)
         self.log("val/mAP", metrics["mean_average_precision"], prog_bar=True)
@@ -167,9 +176,10 @@ class EmbeddingModel(pl.LightningModule):
         self.log("val/r_precision", metrics["r_precision"], prog_bar=True)
 
         # Clear for next epoch
-        self.validation_embeddings.clear()
-        self.validation_labels.clear()
-
+        self.val_query_embeddings.clear()
+        self.val_query_labels.clear()
+        self.val_reference_embeddings.clear()
+        self.val_reference_labels.clear()
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(self.parameters(), lr=self.lr)
@@ -211,7 +221,7 @@ def main():
     CHECKPOINT_DIR = os.path.join(BASE_DIR, "checkpoints")
     EMBEDDING_OUTPUT = os.path.join(BASE_DIR, "all_embeddings.csv")
 
-    BATCH_SIZE = 450
+    BATCH_SIZE = 400
     EPOCHS = 200
     EMBEDDING_DIM = 512
     LR = 1e-4
