@@ -70,11 +70,15 @@ def compute_metrics(embeddings, labels):
 # DATASET
 # =======================
 class CardDataset(Dataset):
-    def __init__(self, csv_path: str, root_dir: str, transform=None):
+    def __init__(self, csv_path: str, root_dir: str, transform=None, label2idx=None):
         self.data = pd.read_csv(csv_path, header=None, names=["filename", "id_str"])
         self.root_dir = root_dir
-        unique_ids = self.data["id_str"].unique()
-        self.label2idx = {id_str: i for i, id_str in enumerate(unique_ids)}
+
+        if label2idx is None:
+            unique_ids = self.data["id_str"].unique()
+            self.label2idx = {id_str: i for i, id_str in enumerate(unique_ids)}
+        else:
+            self.label2idx = label2idx
 
         self.transform = transform or transforms.Compose([
             transforms.RandomPerspective(distortion_scale=0.2, p=0.3),
@@ -101,9 +105,6 @@ class CardDataset(Dataset):
         label = self.label2idx[row["id_str"]]
         return img, label
 
-    @property
-    def num_classes(self):
-        return len(self.label2idx)
 
 # =======================
 # MODEL
@@ -231,16 +232,18 @@ def main():
     CHECKPOINT_DIR = os.path.join(BASE_DIR, "checkpoints")
     EMBEDDING_OUTPUT = os.path.join(BASE_DIR, "all_embeddings.csv")
 
-    BATCH_SIZE = 400
+    BATCH_SIZE = 440
     EPOCHS = 200
     EMBEDDING_DIM = 512
     LR = 1e-4
 
-    # Use augmented dataset for training
-    train_dataset = CardDataset(CSV_FILE, ROOT_DIR)
+    # Build shared label2idx mapping from training set
+    train_df = pd.read_csv(CSV_FILE, header=None, names=["filename", "id_str"])
+    unique_ids = train_df["id_str"].unique()
+    shared_label2idx = {id_str: i for i, id_str in enumerate(unique_ids)}
 
-    # Use one-sample-per-card dataset for validation
-    val_dataset = CardDataset(ORIGINAL_CSV_FILE, ROOT_DIR)
+    train_dataset = CardDataset(CSV_FILE, ROOT_DIR, label2idx=shared_label2idx)
+    val_dataset = CardDataset(ORIGINAL_CSV_FILE, ROOT_DIR, label2idx=shared_label2idx)
 
     train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=15)
     val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=10)
