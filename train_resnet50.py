@@ -155,17 +155,19 @@ class EmbeddingModel(pl.LightningModule):
         all_embeddings = torch.cat(self.validation_embeddings)
         all_labels = torch.cat(self.validation_labels)
 
-        acc_calc = AccuracyCalculator(include=["precision_at_1", "recall_at_1", "recall_at_5", "mean_average_precision"], k=5)
+        acc_calc = AccuracyCalculator(
+            include=["precision_at_1", "mean_average_precision", "mean_reciprocal_rank"],
+            k=5
+        )
         metrics = acc_calc.get_accuracy(
-            all_embeddings.numpy(), all_embeddings.numpy(), 
-            all_labels.numpy(), all_labels.numpy(), 
+            all_embeddings.numpy(), all_embeddings.numpy(),
+            all_labels.numpy(), all_labels.numpy(),
             embeddings_come_from_same_source=True
         )
 
         self.log("val/precision@1", metrics["precision_at_1"], prog_bar=True)
-        self.log("val/recall@1", metrics["recall_at_1"], prog_bar=True)
-        self.log("val/recall@5", metrics["recall_at_5"], prog_bar=True)
         self.log("val/mAP", metrics["mean_average_precision"], prog_bar=True)
+        self.log("val/MRR", metrics["mean_reciprocal_rank"], prog_bar=True)
 
         # Clear for next epoch
         self.validation_embeddings.clear()
