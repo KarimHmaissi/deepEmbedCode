@@ -225,8 +225,8 @@ class CardInferenceDataset(Dataset):
 # =======================
 def main():
     BASE_DIR = "/workspace/deepEmbed"
-    CSV_FILE = os.path.join(BASE_DIR, "dataset/dataset.csv")
-    ORIGINAL_CSV_FILE = os.path.join(BASE_DIR, "dataset/dataset_backup.csv")
+    CSV_FILE = os.path.join(BASE_DIR, "dataset/dataset.csv")  # Augmented entries for training
+    ORIGINAL_CSV_FILE = os.path.join(BASE_DIR, "dataset/dataset_backup.csv")  # Unique entries for validation
     ROOT_DIR = os.path.join(BASE_DIR, "dataset")
     CHECKPOINT_DIR = os.path.join(BASE_DIR, "checkpoints")
     EMBEDDING_OUTPUT = os.path.join(BASE_DIR, "all_embeddings.csv")
@@ -236,12 +236,14 @@ def main():
     EMBEDDING_DIM = 512
     LR = 1e-4
 
-    trainval_dataset = CardDataset(CSV_FILE, ROOT_DIR)
-    val_size = int(0.1 * len(trainval_dataset))
-    train_ds, val_ds = random_split(trainval_dataset, [len(trainval_dataset) - val_size, val_size], generator=torch.Generator().manual_seed(42))
+    # Use augmented dataset for training
+    train_dataset = CardDataset(CSV_FILE, ROOT_DIR)
 
-    train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=15)
-    val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=10)
+    # Use one-sample-per-card dataset for validation
+    val_dataset = CardDataset(ORIGINAL_CSV_FILE, ROOT_DIR)
+
+    train_loader = DataLoader(train_dataset, batch_size=BATCH_SIZE, shuffle=True, num_workers=15)
+    val_loader = DataLoader(val_dataset, batch_size=BATCH_SIZE, shuffle=False, num_workers=10)
 
     model = EmbeddingModel(embedding_dim=EMBEDDING_DIM, lr=LR)
 
@@ -272,6 +274,7 @@ def main():
     resume_ckpt = last_ckpt_path if os.path.exists(last_ckpt_path) else None
     trainer.fit(model, train_loader, val_loader, ckpt_path=resume_ckpt)
 
+    # Run inference on the unique set for final embedding export
     best_model = EmbeddingModel.load_from_checkpoint(checkpoint_callback.best_model_path)
     best_model.eval().freeze()
 
