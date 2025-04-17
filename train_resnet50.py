@@ -21,6 +21,8 @@ from torchvision.models import resnet50, ResNet50_Weights
 from PIL.Image import Resampling
 
 torch.set_float32_matmul_precision("high")      # 40‑series tensor cores
+cpu = torch.device("cpu")        # put this near the top of the file
+
 # ----------------------------------------------------------------------
 # Transforms
 # ----------------------------------------------------------------------
@@ -142,14 +144,14 @@ class EmbeddingModel(pl.LightningModule):
         if hasattr(self.acc_calc, "calculate_in_chunks"):
             m = self.acc_calc.calculate_in_chunks(
                 q_emb, q_lab, r_emb, r_lab,
-                chunk_size=10000, ref_includes_query=False)
+                chunk_size=10000, ref_includes_query=False, device=cpu)
         else:
             print("⚠️  calculate_in_chunks unavailable – "
                   "falling back to get_accuracy (higher RAM).")
             m = self.acc_calc.get_accuracy(
                 q_emb.numpy(), q_lab.numpy(),
                 r_emb.numpy(), r_lab.numpy(),
-                ref_includes_query=False)
+                ref_includes_query=False, device=cpu)
 
         self.log_dict({
             "val/precision@1": m["precision_at_1"],
