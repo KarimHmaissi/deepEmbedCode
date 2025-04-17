@@ -121,35 +121,37 @@ class EmbeddingModel(pl.LightningModule):
         self.val_labels.append(y.cpu())
 
     def on_validation_epoch_end(self):
-        q_emb = torch.cat(self.val_embs); self.val_embs.clear()
+        q_emb = torch.cat(self.val_embs);  self.val_embs.clear()
         q_lab = torch.cat(self.val_labels); self.val_labels.clear()
 
-        # --- always rebuild reference embeddings --------------------
+        # --- rebuild reference embeddings every epoch ----------------
         r_embs, r_labs = [], []
         with torch.no_grad():
             for imgs, y in self.ref_loader:
                 imgs = imgs.to(self.device, non_blocking=True)
-                r_embs.append(self(imgs).cpu()); r_labs.append(y.cpu())
+                r_embs.append(self(imgs).cpu());  r_labs.append(y.cpu())
         r_emb = torch.cat(r_embs);  r_lab = torch.cat(r_labs)
 
+        # --- RAM‑safe metrics if available ---------------------------
         if hasattr(self.acc_calc, "calculate_in_chunks"):
-                m = self.acc_calc.calculate_in_chunks(
-                    q_emb, q_lab, r_emb, r_lab,
-                    chunk_size=10000, ref_includes_query=False)
-        else:                          # <- fallback for stripped builds
-            print("⚠️  AccuracyCalculator.calculate_in_chunks unavailable – "
-                "falling back to get_accuracy (higher RAM).")
+            m = self.acc_calc.calculate_in_chunks(
+                q_emb, q_lab, r_emb, r_lab,
+                chunk_size=10000, ref_includes_query=False)
+        else:
+            print("⚠️  calculate_in_chunks unavailable – "
+                  "falling back to get_accuracy (higher RAM).")
             m = self.acc_calc.get_accuracy(
                 q_emb.numpy(), q_lab.numpy(),
                 r_emb.numpy(), r_lab.numpy(),
                 ref_includes_query=False)
-            
+
         self.log_dict({
             "val/precision@1": m["precision_at_1"],
             "val/mAP":         m["mean_average_precision"],
             "val/mAP@r":       m["mean_average_precision_at_r"],
-            "val/r_precision": m["r_precision"]
+            "val/r_precision": m["r_precision"],
         }, prog_bar=True, sync_dist=True)
+
 
     # ------------ optimiser -------------------
     def configure_optimizers(self):
