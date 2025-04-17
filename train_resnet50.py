@@ -94,9 +94,11 @@ class EmbeddingModel(pl.LightningModule):
         self.loss_f = TripletMarginLoss(margin=0.2)
 
         self.acc_calc = AccuracyCalculator(
-            include=("precision_at_1","mean_average_precision",
-                     "mean_average_precision_at_r","r_precision"),
-            k="max_bin_count")
+            include=("precision_at_1", "mean_average_precision",
+                    "mean_average_precision_at_r", "r_precision"),
+            k="max_bin_count",
+            device=cpu          # <-- sets CPU mode once and for all
+        )
 
         self.val_embs, self.val_labels = [], []
         self.ref_loader = ref_loader
@@ -144,14 +146,14 @@ class EmbeddingModel(pl.LightningModule):
         if hasattr(self.acc_calc, "calculate_in_chunks"):
             m = self.acc_calc.calculate_in_chunks(
                 q_emb, q_lab, r_emb, r_lab,
-                chunk_size=10000, ref_includes_query=False, device=cpu)
+                chunk_size=10000, ref_includes_query=False)
         else:
             print("⚠️  calculate_in_chunks unavailable – "
                   "falling back to get_accuracy (higher RAM).")
             m = self.acc_calc.get_accuracy(
                 q_emb.numpy(), q_lab.numpy(),
                 r_emb.numpy(), r_lab.numpy(),
-                ref_includes_query=False, device=cpu)
+                ref_includes_query=False)
 
         self.log_dict({
             "val/precision@1": m["precision_at_1"],
