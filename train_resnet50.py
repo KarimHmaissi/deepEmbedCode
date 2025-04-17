@@ -121,6 +121,12 @@ class EmbeddingModel(pl.LightningModule):
         self.val_labels.append(y.cpu())
 
     def on_validation_epoch_end(self):
+        # -------------------------------------------------------------
+        # Lightning runs a short sanity‑check < before epoch 0 >.
+        # Skip the full reference loop in that phase.
+        # -------------------------------------------------------------
+        if self.trainer.sanity_checking:
+            return
         q_emb = torch.cat(self.val_embs);  self.val_embs.clear()
         q_lab = torch.cat(self.val_labels); self.val_labels.clear()
 
@@ -205,12 +211,13 @@ def main():
 
     # -------- datasets & loaders --------------------------
     train_ds     = CardDataset(train_csv_path, ROOT, train_tf, label_map)
-    val_query_ds = CardDataset(VAL_CSV,        ROOT, val_tf,   label_map)
-    val_ref_ds   = CardDataset(train_csv_path, ROOT, val_tf,   label_map)
+    val_query_ds = CardDataset(VAL_CSV, ROOT, val_tf, label_map)
+    val_ref_ds   = CardDataset(VAL_CSV, ROOT, val_tf, label_map)
 
     train_ld = DataLoader(train_ds, BS, shuffle=True,  num_workers=15, pin_memory=True)
     val_qld  = DataLoader(val_query_ds, BS, shuffle=False, num_workers=10, pin_memory=True)
-    val_rld  = DataLoader(val_ref_ds,   BS, shuffle=False, num_workers=10, pin_memory=False)
+    # val_rld  = DataLoader(val_ref_ds,   BS, shuffle=False, num_workers=10, pin_memory=False)
+    val_rld  = DataLoader(val_ref_ds, BS, shuffle=False, num_workers=12, pin_memory=False, persistent_workers=True)
 
     # -------- model ---------------------------------------
     model = EmbeddingModel(EMB, LR, ref_loader=val_rld)
