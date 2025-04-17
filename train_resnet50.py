@@ -148,8 +148,6 @@ class EmbeddingModel(pl.LightningModule):
                 q_emb, q_lab, r_emb, r_lab,
                 chunk_size=10000, ref_includes_query=False)
         else:
-            print("⚠️  calculate_in_chunks unavailable – "
-                  "falling back to get_accuracy (higher RAM).")
             m = self.acc_calc.get_accuracy(
                 q_emb.numpy(), q_lab.numpy(),
                 r_emb.numpy(), r_lab.numpy(),
@@ -242,7 +240,8 @@ def main():
     # -------- export embeddings ---------------------------
     best_path = resume
     # best_path = ckpt_cb.best_model_path or resume
-    best = EmbeddingModel.load_from_checkpoint(best_path, EMB, LR, ref_loader=val_rld)
+    best = EmbeddingModel.load_from_checkpoint(best_path, emb_dim=EMB, lr=LR, ref_loader=val_rld)
+
     best.eval().freeze()
 
     inf_ld = DataLoader(CardInferenceDataset(VAL_CSV, ROOT),
