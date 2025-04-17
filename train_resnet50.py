@@ -199,7 +199,7 @@ def main():
 
     train_ld = DataLoader(train_ds, BS, shuffle=True,  num_workers=15, pin_memory=True)
     val_qld  = DataLoader(val_query_ds, BS, shuffle=False, num_workers=10, pin_memory=True)
-    val_rld  = DataLoader(val_ref_ds,   BS, shuffle=False, num_workers=10, pin_memory=True)
+    val_rld  = DataLoader(val_ref_ds,   BS, shuffle=False, num_workers=10, pin_memory=False)
 
     # -------- model ---------------------------------------
     model = EmbeddingModel(EMB, LR, ref_loader=val_rld)
