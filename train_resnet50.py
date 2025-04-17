@@ -234,8 +234,8 @@ def main():
                          logger=logger, default_root_dir=CKPT_DIR)
 
     resume = os.path.join(CKPT_DIR, "last.ckpt")
-    # trainer.fit(model, train_ld, val_qld,
-    #             ckpt_path=resume if os.path.exists(resume) else None)
+    trainer.fit(model, train_ld, val_qld,
+                ckpt_path=resume if os.path.exists(resume) else None)
 
     # -------- export embeddings ---------------------------
     best_path = resume
