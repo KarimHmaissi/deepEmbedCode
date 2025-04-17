@@ -236,16 +236,17 @@ def main():
                          logger=logger, default_root_dir=CKPT_DIR)
 
     resume = os.path.join(CKPT_DIR, "last.ckpt")
-    trainer.fit(model, train_ld, val_qld,
-                ckpt_path=resume if os.path.exists(resume) else None)
+    # trainer.fit(model, train_ld, val_qld,
+    #             ckpt_path=resume if os.path.exists(resume) else None)
 
     # -------- export embeddings ---------------------------
-    best_path = ckpt_cb.best_model_path or resume
+    best_path = resume
+    # best_path = ckpt_cb.best_model_path or resume
     best = EmbeddingModel.load_from_checkpoint(best_path, EMB, LR, ref_loader=val_rld)
     best.eval().freeze()
 
     inf_ld = DataLoader(CardInferenceDataset(VAL_CSV, ROOT),
-                        batch_size=32, shuffle=False, num_workers=8)
+                        batch_size=64, shuffle=False, num_workers=15)
     embs, ids, idxs = [], [], []
     with torch.no_grad():
         for imgs, id_strs, ixs in inf_ld:
